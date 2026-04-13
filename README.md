@@ -3,11 +3,14 @@
 Serverless AI agent that answers questions about a venue — events, tickets, FAQ — powered by OpenAI GPT-4o-mini and deployed on AWS Lambda as a Docker container image.
 
 ## Architecture
+
+```
 HTTP POST /ask
-→ API Gateway
-→ AWS Lambda (Docker container)
-→ OpenAI GPT-4o-mini
-→ JSON response
+    → API Gateway
+    → AWS Lambda (Docker container)
+    → OpenAI GPT-4o-mini
+    → JSON response
+```
 
 CI/CD: every push to `main` automatically builds and deploys via GitHub Actions.
 
@@ -22,6 +25,8 @@ CI/CD: every push to `main` automatically builds and deploys via GitHub Actions.
 - **GitHub Actions** — CI/CD pipeline
 
 ## Project Structure
+
+```
 venue-agent/
 ├── app/
 │   ├── handler.py      # Lambda entrypoint
@@ -34,6 +39,7 @@ venue-agent/
 │       └── deploy.yml  # CI/CD pipeline
 ├── Dockerfile
 └── requirements.txt
+```
 
 ## Engineering Decisions
 
