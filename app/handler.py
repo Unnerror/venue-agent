@@ -1,39 +1,64 @@
 import json
 import os
+import logging
+from pydantic import BaseModel, field_validator, ValidationError
 from app.agent import ask_agent
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 API_KEY = os.environ.get("API_KEY")
 
+
+class QuestionRequest(BaseModel):
+    question: str
+
+    @field_validator("question")
+    @classmethod
+    def question_not_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("question must not be empty")
+        if len(v) > 1000:
+            raise ValueError("question must be 1000 characters or fewer")
+        return v
+
+
 def lambda_handler(event, context):
     try:
-        # API key check
+        # Auth check
         headers = event.get("headers", {})
         request_key = headers.get("x-api-key") or headers.get("X-Api-Key")
-
         if API_KEY and request_key != API_KEY:
-            return {
-                "statusCode": 401,
-                "body": json.dumps({"error": "Unauthorized"})
-            }
+            return _response(401, {"error": "Unauthorized"})
 
-        body = json.loads(event.get("body", "{}"))
-        question = body.get("question", "").strip()
+        # Parse + validate body
+        raw_body = event.get("body", "{}")
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError:
+            return _response(400, {"error": "Invalid JSON body"})
 
-        if not question:
-            return {
-                "statusCode": 400,
-                "body": json.dumps({"error": "Missing 'question' field"})
-            }
+        try:
+            request = QuestionRequest(**body)
+        except ValidationError as e:
+            errors = e.errors()
+            return _response(400, {"error": errors[0]["msg"]})
 
-        answer = ask_agent(question)
-
-        return {
-            "statusCode": 200,
-            "body": json.dumps({"answer": answer})
-        }
+        answer = ask_agent(request.question)
+        return _response(200, {"answer": answer})
 
     except Exception as e:
-        return {
-            "statusCode": 500,
-            "body": json.dumps({"error": str(e)})
-        }
+        logger.exception("Unhandled error in lambda_handler")
+        return _response(500, {"error": "Internal server error"})
+
+
+def _response(status_code: int, body: dict) -> dict:
+    return {
+        "statusCode": status_code,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+        },
+        "body": json.dumps(body),
+    }

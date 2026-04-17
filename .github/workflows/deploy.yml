@@ -34,9 +34,16 @@ jobs:
             --output type=registry \
             -t ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-2.amazonaws.com/venue-agent:latest .
 
-      - name: Update Lambda function
+      - name: Update chat Lambda
         run: |
           aws lambda update-function-code \
             --function-name venue-agent \
+            --image-uri ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-2.amazonaws.com/venue-agent:latest \
+            --region us-east-2
+
+      - name: Update scraper Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name venue-agent-scraper \
             --image-uri ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-2.amazonaws.com/venue-agent:latest \
             --region us-east-2
