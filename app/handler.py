@@ -3,6 +3,7 @@ import os
 import logging
 from pydantic import BaseModel, field_validator, ValidationError
 from app.agent import ask_agent
+from app.embedder import upsert_documents
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +26,32 @@ class QuestionRequest(BaseModel):
 
 
 def lambda_handler(event, context):
+    # Internal call from scraper Lambda
+    if event.get("source") == "scraper":
+        return _handle_upsert(event)
+
+    # External call from API Gateway
+    return _handle_question(event)
+
+
+def _handle_upsert(event):
+    """Called by scraper Lambda to upsert documents into ChromaDB."""
+    try:
+        documents = event.get("documents", [])
+        if not documents:
+            return {"statusCode": 400, "body": json.dumps({"error": "No documents provided"})}
+
+        count = upsert_documents(documents)
+        logger.info(f"Upserted {count} documents from scraper.")
+        return {"statusCode": 200, "body": json.dumps({"upserted": count})}
+
+    except Exception as e:
+        logger.exception("Upsert failed")
+        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
+
+
+def _handle_question(event):
+    """Called by API Gateway for user questions."""
     try:
         # Auth check
         headers = event.get("headers", {})
@@ -42,14 +69,13 @@ def lambda_handler(event, context):
         try:
             request = QuestionRequest(**body)
         except ValidationError as e:
-            errors = e.errors()
-            return _response(400, {"error": errors[0]["msg"]})
+            return _response(400, {"error": e.errors()[0]["msg"]})
 
         answer = ask_agent(request.question)
         return _response(200, {"answer": answer})
 
     except Exception as e:
-        logger.exception("Unhandled error in lambda_handler")
+        logger.exception("Unhandled error in _handle_question")
         return _response(500, {"error": "Internal server error"})
 
 
