@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 response.json
 frontend/.env.local
+frontend/node_modules/
