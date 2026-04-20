@@ -2,6 +2,8 @@
 
 Serverless RAG chatbot that answers questions about Théâtre Rialto — upcoming events, tickets, and venue FAQ. Powered by OpenAI GPT-4o-mini with ChromaDB vector search, deployed on AWS Lambda + Vercel.
 
+**Live demo:** [venue-agent-nine.vercel.app](https://venue-agent-nine.vercel.app)
+
 ## Architecture
 
 ```
