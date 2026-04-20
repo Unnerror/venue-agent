@@ -1,5 +1,6 @@
 import os
 import logging
+from datetime import datetime, timezone
 from openai import OpenAI
 from app.embedder import query_collection
 
@@ -26,25 +27,24 @@ A: Yes, wheelchair accessible entrance on the south side of the building.
 
 
 def ask_agent(question: str) -> str:
-    # 1. Retrieve relevant event chunks from ChromaDB
+    today = datetime.now(timezone.utc).strftime("%B %d, %Y")
+
     relevant_docs = query_collection(question, n_results=3)
 
-    # 2. Build context: static FAQ + RAG results
     if relevant_docs:
         rag_context = "\n\n".join(relevant_docs)
         system_prompt = (
+            f"Today's date is {today}.\n\n"
             f"{STATIC_CONTEXT}\n\n"
             f"Upcoming events (retrieved from knowledge base):\n{rag_context}"
         )
     else:
-        # Fallback: no events indexed yet
         system_prompt = (
+            f"Today's date is {today}.\n\n"
             f"{STATIC_CONTEXT}\n\n"
             "Note: Event schedule is currently unavailable. "
             "Please check https://www.theatrerialto.ca/calendar for upcoming shows."
         )
-
-    logger.info(f"System prompt length: {len(system_prompt)} chars")
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
