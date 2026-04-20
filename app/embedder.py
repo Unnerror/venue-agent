@@ -1,9 +1,7 @@
 import os
 import io
-import json
 import tarfile
 import logging
-import tempfile
 from typing import Optional
 
 # Patch sqlite3 for AWS Lambda
@@ -28,7 +26,6 @@ _collection = None
 
 
 def _restore_from_s3():
-    """Download ChromaDB backup from S3 to /tmp/chroma."""
     try:
         s3 = boto3.client("s3")
         buf = io.BytesIO()
@@ -39,12 +36,11 @@ def _restore_from_s3():
         logger.info("ChromaDB restored from S3.")
         return True
     except Exception as e:
-        logger.warning(f"Could not restore from S3 (first run?): {e}")
+        logger.warning(f"Could not restore from S3: {e}")
         return False
 
 
 def _backup_to_s3():
-    """Upload /tmp/chroma to S3 as tar.gz."""
     try:
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -58,7 +54,6 @@ def _backup_to_s3():
 
 
 def _get_collection():
-    """Lazy singleton — restore from S3 if /tmp/chroma doesn't exist."""
     global _collection
     if _collection is not None:
         return _collection
@@ -74,7 +69,7 @@ def _get_collection():
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
     )
-    logger.info(f"ChromaDB collection ready at {CHROMA_PATH}, count={_collection.count()}")
+    logger.info(f"ChromaDB ready, count={_collection.count()}")
     return _collection
 
 
@@ -107,15 +102,13 @@ def upsert_documents(documents: list[dict]) -> int:
     )
 
     _backup_to_s3()
-    logger.info(f"Upserted {len(documents)} documents and backed up to S3.")
     return len(documents)
 
 
-def query_collection(question: str, n_results: int = 3) -> list[str]:
+def query_collection(question: str, n_results: int = 5) -> list[str]:
+    """Semantic similarity search — for specific questions like 'tell me about Bingo Loco'."""
     collection = _get_collection()
-
     if collection.count() == 0:
-        logger.warning("ChromaDB empty — no events indexed yet.")
         return []
 
     question_embedding = embed_texts([question])[0]
@@ -125,3 +118,40 @@ def query_collection(question: str, n_results: int = 3) -> list[str]:
         include=["documents"],
     )
     return results.get("documents", [[]])[0]
+
+
+def query_by_date_range(date_from: str, date_to: str) -> list[str]:
+    """
+    Metadata filter search — for date/schedule queries.
+    date_from, date_to: ISO format strings e.g. '2026-04-25'
+    Returns all events within the date range.
+    """
+    collection = _get_collection()
+    if collection.count() == 0:
+        return []
+
+    try:
+        results = collection.get(
+            where={
+                "$and": [
+                    {"date": {"$gte": date_from}},
+                    {"date": {"$lte": date_to}},
+                ]
+            },
+            include=["documents"],
+        )
+        docs = results.get("documents", [])
+        logger.info(f"Date range query {date_from}→{date_to}: {len(docs)} results")
+        return docs
+    except Exception as e:
+        logger.error(f"Date range query failed: {e}")
+        return []
+
+
+def get_all_documents() -> list[str]:
+    """Fallback — return all documents."""
+    collection = _get_collection()
+    if collection.count() == 0:
+        return []
+    results = collection.get(include=["documents"])
+    return results.get("documents", [])
