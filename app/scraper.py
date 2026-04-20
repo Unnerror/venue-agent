@@ -127,6 +127,7 @@ def events_to_documents(events: list[Event]) -> list[dict]:
             "metadata": {
                 "title": event.title,
                 "date": event.date,
+                "date_int": int(event.date.replace("-", "")) if event.date else 0,
                 "time": event.time,
                 "url": event.url,
                 "tickets": event.tickets or "",

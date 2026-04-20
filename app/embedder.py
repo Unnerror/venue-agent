@@ -2,9 +2,7 @@ import os
 import io
 import tarfile
 import logging
-from typing import Optional
 
-# Patch sqlite3 for AWS Lambda
 __import__("pysqlite3")
 import sys
 sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
@@ -57,10 +55,8 @@ def _get_collection():
     global _collection
     if _collection is not None:
         return _collection
-
     if not os.path.exists(CHROMA_PATH):
         _restore_from_s3()
-
     client = chromadb.PersistentClient(
         path=CHROMA_PATH,
         settings=Settings(anonymized_telemetry=False),
@@ -85,7 +81,6 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 def upsert_documents(documents: list[dict]) -> int:
     if not documents:
         return 0
-
     collection = _get_collection()
     ids = [doc["id"] for doc in documents]
     texts = [doc["text"] for doc in documents]
@@ -93,24 +88,21 @@ def upsert_documents(documents: list[dict]) -> int:
 
     logger.info(f"Generating embeddings for {len(texts)} documents...")
     embeddings = embed_texts(texts)
-
     collection.upsert(
         ids=ids,
         embeddings=embeddings,
         documents=texts,
         metadatas=metadatas,
     )
-
     _backup_to_s3()
     return len(documents)
 
 
 def query_collection(question: str, n_results: int = 5) -> list[str]:
-    """Semantic similarity search — for specific questions like 'tell me about Bingo Loco'."""
+    """Semantic similarity search."""
     collection = _get_collection()
     if collection.count() == 0:
         return []
-
     question_embedding = embed_texts([question])[0]
     results = collection.query(
         query_embeddings=[question_embedding],
@@ -122,36 +114,30 @@ def query_collection(question: str, n_results: int = 5) -> list[str]:
 
 def query_by_date_range(date_from: str, date_to: str) -> list[str]:
     """
-    Metadata filter search — for date/schedule queries.
-    date_from, date_to: ISO format strings e.g. '2026-04-25'
-    Returns all events within the date range.
+    Metadata filter search using date_int (YYYYMMDD integer).
+    date_from, date_to: ISO strings e.g. '2026-04-25'
     """
     collection = _get_collection()
     if collection.count() == 0:
         return []
 
+    # Convert ISO date to integer YYYYMMDD
+    date_from_int = int(date_from.replace("-", ""))
+    date_to_int = int(date_to.replace("-", ""))
+
     try:
         results = collection.get(
             where={
                 "$and": [
-                    {"date": {"$gte": date_from}},
-                    {"date": {"$lte": date_to}},
+                    {"date_int": {"$gte": date_from_int}},
+                    {"date_int": {"$lte": date_to_int}},
                 ]
             },
             include=["documents"],
         )
         docs = results.get("documents", [])
-        logger.info(f"Date range query {date_from}→{date_to}: {len(docs)} results")
+        logger.info(f"Date range {date_from}→{date_to} (int: {date_from_int}→{date_to_int}): {len(docs)} results")
         return docs
     except Exception as e:
         logger.error(f"Date range query failed: {e}")
         return []
-
-
-def get_all_documents() -> list[str]:
-    """Fallback — return all documents."""
-    collection = _get_collection()
-    if collection.count() == 0:
-        return []
-    results = collection.get(include=["documents"])
-    return results.get("documents", [])
