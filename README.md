@@ -122,8 +122,12 @@ AWS_ACCOUNT_ID
 2. Add environment variables:
    - `LAMBDA_URL` — API Gateway endpoint
    - `API_KEY` — Lambda API key
+3. In Project Settings → General → Ignored Build Step, select "Only build if there are changes in a folder" and enter `frontend/`
 
-Push to `main` — GitHub Actions builds the Docker image, deploys both Lambdas. Vercel auto-deploys frontend.
+**Deployment triggers:**
+- Push changes to `app/`, `Dockerfile`, or `requirements.txt` → AWS Lambda redeploys
+- Push changes to `frontend/` → Vercel redeploys
+- Push changes to `README.md` or other files → nothing redeploys
 
 ## API
 
