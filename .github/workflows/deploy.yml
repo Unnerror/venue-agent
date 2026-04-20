@@ -3,6 +3,10 @@ name: Deploy to AWS Lambda
 on:
   push:
     branches: [main]
+    paths:
+      - 'app/**'
+      - 'Dockerfile'
+      - 'requirements.txt'
 
 jobs:
   deploy:

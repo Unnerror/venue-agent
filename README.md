@@ -1,94 +1,141 @@
 # Venue Agent
 
-Serverless AI agent that answers questions about a venue — events, tickets, FAQ — powered by OpenAI GPT-4o-mini and deployed on AWS Lambda as a Docker container image.
+Serverless RAG chatbot that answers questions about Théâtre Rialto — upcoming events, tickets, and venue FAQ. Powered by OpenAI GPT-4o-mini with ChromaDB vector search, deployed on AWS Lambda + Vercel.
 
 ## Architecture
 
 ```
-HTTP POST /ask
-    → API Gateway
-    → AWS Lambda (Docker container)
-    → OpenAI GPT-4o-mini
-    → JSON response
-```
+EventBridge (daily 6 AM)
+    → Scraper Lambda
+        → scrapes theatrerialto.ca/calendar
+        → OpenAI embeddings
+        → ChromaDB (persisted to S3)
 
-CI/CD: every push to `main` automatically builds and deploys via GitHub Actions.
+User (Vercel frontend)
+    → Next.js /api/chat (proxy)
+        → API Gateway
+            → Chat Lambda
+                → ChromaDB metadata filter + semantic search (RAG)
+                → GPT-4o-mini
+                → answer with event details + ticket links
+```
 
 ## Tech Stack
 
-- **Python 3.11**
-- **OpenAI API** (GPT-4o-mini)
-- **Docker** — container image deployment
-- **AWS Lambda** — serverless compute
-- **AWS ECR** — container registry
-- **API Gateway** — HTTP endpoint
-- **GitHub Actions** — CI/CD pipeline
+| Layer | Technology |
+|---|---|
+| LLM | OpenAI GPT-4o-mini |
+| Embeddings | OpenAI text-embedding-3-small |
+| Vector DB | ChromaDB (persistent, S3-backed) |
+| Backend | Python 3.11, AWS Lambda (Docker) |
+| Container registry | AWS ECR |
+| HTTP endpoint | AWS API Gateway |
+| Scheduler | AWS EventBridge |
+| Frontend | Next.js 14 + TypeScript |
+| Frontend hosting | Vercel |
+| CI/CD | GitHub Actions |
+| Validation | Pydantic v2 |
 
 ## Project Structure
 
 ```
 venue-agent/
 ├── app/
-│   ├── handler.py      # Lambda entrypoint
-│   ├── agent.py        # OpenAI integration
-│   └── knowledge.py    # Context builder from venue data
-├── data/
-│   └── venue_info.json # Venue knowledge base
-├── .github/
-│   └── workflows/
-│       └── deploy.yml  # CI/CD pipeline
+│   ├── handler.py          # Chat Lambda entrypoint + Pydantic validation
+│   ├── agent.py            # RAG pipeline (date-aware metadata filtering)
+│   ├── embedder.py         # ChromaDB client + OpenAI embeddings + S3 backup
+│   ├── scraper.py          # theatrerialto.ca/calendar parser
+│   └── scraper_handler.py  # Scraper Lambda entrypoint
+├── frontend/
+│   ├── app/
+│   │   ├── page.tsx        # Chat UI
+│   │   ├── layout.tsx
+│   │   └── globals.css
+│   └── pages/api/
+│       └── chat.ts         # Vercel serverless proxy
+├── .github/workflows/
+│   └── deploy.yml          # CI/CD — builds Docker image, deploys both Lambdas
 ├── Dockerfile
 └── requirements.txt
 ```
 
 ## Engineering Decisions
 
-**Docker over zip deployment** — container image provides a reproducible environment, simplifies local testing via Lambda Runtime Interface, and supports heavier dependencies without size constraints.
+**RAG with metadata filtering** — ChromaDB stores event embeddings with structured metadata (`date_int: YYYYMMDD`). Date-range queries (e.g. "this weekend", "events in May") use metadata filtering rather than pure semantic similarity, which is more precise for temporal queries. Specific questions ("tell me about Bingo Loco") use cosine similarity search.
 
-**Context injection via system prompt** — venue data is loaded from a JSON knowledge base and injected into the LLM system prompt at runtime. This keeps the agent factually grounded without requiring a vector database for this scale.
+**S3-backed ChromaDB** — Lambda `/tmp` is ephemeral. After each scrape, the ChromaDB directory is archived and uploaded to S3. On cold start, the chat Lambda restores from S3 before serving requests — no persistent compute needed.
 
-**API key authentication** — requests require an `x-api-key` header, validated in the Lambda handler before any LLM call is made. Keys are stored as Lambda environment variables, never in source code.
+**Two-Lambda architecture** — scraper and chat are separate Lambda functions sharing one Docker image (different CMD). Scraper runs without VPC (needs internet to scrape), chat Lambda handles user requests. EventBridge triggers the scraper daily.
 
-**Stateless design** — each Lambda invocation is fully independent, consistent with serverless best practices and horizontal scaling.
+**Vercel proxy** — the API key never reaches the browser. Vercel serverless function proxies requests to API Gateway, injecting the key from environment variables server-side.
+
+**Docker over zip** — container image provides reproducible environment, simplifies local testing via Lambda Runtime Interface Emulator, and supports heavy dependencies (ChromaDB, numpy) without Lambda size constraints.
 
 ## Local Development
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-export OPENAI_API_KEY=your-key
-python3 -c "from app.agent import ask_agent; print(ask_agent('When is the next event?'))"
-```
-
-## Local Docker Test
-
-```bash
+# Build image
 docker build -t venue-agent .
-docker run -p 9000:8080 -e OPENAI_API_KEY=$OPENAI_API_KEY -e API_KEY=your-key venue-agent
-curl -X POST "http://localhost:9000/2015-03-31/functions/function/invocations" \
+
+# Run scraper (populates ChromaDB in /tmp/venue-chroma)
+docker run --rm \
+  -e OPENAI_API_KEY=sk-... \
+  -e EFS_MOUNT_PATH=/tmp \
+  -v /tmp/venue-chroma:/tmp/chroma \
+  -p 9000:8080 \
+  venue-agent app.scraper_handler.lambda_handler
+
+curl -X POST http://localhost:9000/2015-03-31/functions/function/invocations -d '{}'
+
+# Run chat Lambda (reads from same volume)
+docker run --rm \
+  -e OPENAI_API_KEY=sk-... \
+  -e EFS_MOUNT_PATH=/tmp \
+  -e API_KEY=test-key \
+  -v /tmp/venue-chroma:/tmp/chroma \
+  -p 9000:8080 \
+  venue-agent app.handler.lambda_handler
+
+curl -X POST http://localhost:9000/2015-03-31/functions/function/invocations \
   -H "Content-Type: application/json" \
-  -d '{"body": "{\"question\": \"When is the next event?\"}"}'
+  -d '{"headers":{"x-api-key":"test-key"},"body":"{\"question\":\"What is on this weekend?\"}"}'
 ```
 
 ## Deploy Your Own
 
-1. Create AWS ECR repository and Lambda function
-2. Add GitHub Secrets: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ACCOUNT_ID`
-3. Push to `main` — GitHub Actions handles the rest
+### AWS Setup
+1. Create ECR repository: `venue-agent`
+2. Create two Lambda functions: `venue-agent` and `venue-agent-scraper` (same image, different CMD)
+3. Create S3 bucket for ChromaDB backup
+4. Create EventBridge schedule targeting `venue-agent-scraper` (daily cron)
+5. Add IAM policy: scraper Lambda can invoke chat Lambda
 
-## API Usage
+### GitHub Secrets
+```
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_ACCOUNT_ID
+```
+
+### Vercel Setup
+1. Import repo, set Root Directory to `frontend`
+2. Add environment variables:
+   - `LAMBDA_URL` — API Gateway endpoint
+   - `API_KEY` — Lambda API key
+
+Push to `main` — GitHub Actions builds the Docker image, deploys both Lambdas. Vercel auto-deploys frontend.
+
+## API
 
 ```bash
 curl -X POST "https://your-api-id.execute-api.us-east-2.amazonaws.com/prod/ask" \
   -H "Content-Type: application/json" \
-  -H "x-api-key: your-api-key" \
-  -d '{"question": "When is the next event?"}'
+  -H "x-api-key: your-key" \
+  -d '{"question": "What is on this weekend?"}'
 ```
 
-Response:
 ```json
 {
-  "answer": "The next event at Rialto Theatre is Jazz Night on May 10, 2025, at 20:00."
+  "answer": "This weekend at Théâtre Rialto, there are two events on Saturday, April 25: Candlelight: Tribute to Adele at 6:30 PM and Candlelight: A Tribute to Coldplay at 9:00 PM."
 }
 ```
