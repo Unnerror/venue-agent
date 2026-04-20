@@ -14,11 +14,16 @@ const SUGGESTIONS = [
 ];
 
 function formatText(text: string) {
-  // Convert markdown links [text](url) to anchor tags
-  return text.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,
-    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
-  );
+  return text
+    // Bold **text**
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    // Markdown links [text](url)
+    .replace(
+      /\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
+    )
+    // Line breaks
+    .replace(/\n/g, "<br/>");
 }
 
 export default function Home() {
