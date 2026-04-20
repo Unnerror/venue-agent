@@ -1,50 +1,84 @@
 import os
+import io
+import json
+import tarfile
 import logging
+import tempfile
 from typing import Optional
 
-# Patch sqlite3 for AWS Lambda (Amazon Linux 2 ships sqlite3 < 3.35.0)
-# pysqlite3-binary provides a newer version that ChromaDB requires
+# Patch sqlite3 for AWS Lambda
 __import__("pysqlite3")
 import sys
 sys.modules["sqlite3"] = sys.modules.pop("pysqlite3")
 
+import boto3
 import chromadb
 from chromadb.config import Settings
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
-# EFS mount path — Lambda монтирует EFS сюда (настраивается в AWS консоли)
-EFS_MOUNT_PATH = os.environ.get("EFS_MOUNT_PATH", "/mnt/efs")
-CHROMA_PATH = os.path.join(EFS_MOUNT_PATH, "chroma")
+CHROMA_PATH = "/tmp/chroma"
 COLLECTION_NAME = "venue_events"
-
 EMBEDDING_MODEL = "text-embedding-3-small"
+S3_BUCKET = os.environ.get("S3_BUCKET", "venue-agent-chromadb")
+S3_KEY = "chroma_backup.tar.gz"
 
-_client: Optional[chromadb.Client] = None
 _collection = None
 
 
+def _restore_from_s3():
+    """Download ChromaDB backup from S3 to /tmp/chroma."""
+    try:
+        s3 = boto3.client("s3")
+        buf = io.BytesIO()
+        s3.download_fileobj(S3_BUCKET, S3_KEY, buf)
+        buf.seek(0)
+        with tarfile.open(fileobj=buf, mode="r:gz") as tar:
+            tar.extractall("/tmp")
+        logger.info("ChromaDB restored from S3.")
+        return True
+    except Exception as e:
+        logger.warning(f"Could not restore from S3 (first run?): {e}")
+        return False
+
+
+def _backup_to_s3():
+    """Upload /tmp/chroma to S3 as tar.gz."""
+    try:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            tar.add(CHROMA_PATH, arcname="chroma")
+        buf.seek(0)
+        s3 = boto3.client("s3")
+        s3.upload_fileobj(buf, S3_BUCKET, S3_KEY)
+        logger.info("ChromaDB backed up to S3.")
+    except Exception as e:
+        logger.error(f"S3 backup failed: {e}")
+
+
 def _get_collection():
-    """Lazy singleton — инициализируется один раз на lifetime Lambda контейнера."""
-    global _client, _collection
+    """Lazy singleton — restore from S3 if /tmp/chroma doesn't exist."""
+    global _collection
     if _collection is not None:
         return _collection
 
-    _client = chromadb.PersistentClient(
+    if not os.path.exists(CHROMA_PATH):
+        _restore_from_s3()
+
+    client = chromadb.PersistentClient(
         path=CHROMA_PATH,
         settings=Settings(anonymized_telemetry=False),
     )
-    _collection = _client.get_or_create_collection(
+    _collection = client.get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
     )
-    logger.info(f"ChromaDB collection '{COLLECTION_NAME}' ready at {CHROMA_PATH}")
+    logger.info(f"ChromaDB collection ready at {CHROMA_PATH}, count={_collection.count()}")
     return _collection
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Call OpenAI embeddings API for a batch of texts."""
     openai_client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
     response = openai_client.embeddings.create(
         model=EMBEDDING_MODEL,
@@ -54,17 +88,10 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 
 def upsert_documents(documents: list[dict]) -> int:
-    """
-    Upsert documents into ChromaDB.
-    Each document: {"id": str, "text": str, "metadata": dict}
-    Returns count of upserted documents.
-    """
     if not documents:
-        logger.warning("No documents to upsert.")
         return 0
 
     collection = _get_collection()
-
     ids = [doc["id"] for doc in documents]
     texts = [doc["text"] for doc in documents]
     metadatas = [doc["metadata"] for doc in documents]
@@ -79,29 +106,22 @@ def upsert_documents(documents: list[dict]) -> int:
         metadatas=metadatas,
     )
 
-    logger.info(f"Upserted {len(documents)} documents into ChromaDB.")
+    _backup_to_s3()
+    logger.info(f"Upserted {len(documents)} documents and backed up to S3.")
     return len(documents)
 
 
 def query_collection(question: str, n_results: int = 3) -> list[str]:
-    """
-    Query ChromaDB with a natural language question.
-    Returns top-n matching document texts.
-    """
     collection = _get_collection()
 
     if collection.count() == 0:
-        logger.warning("ChromaDB collection is empty — no events indexed yet.")
+        logger.warning("ChromaDB empty — no events indexed yet.")
         return []
 
     question_embedding = embed_texts([question])[0]
-
     results = collection.query(
         query_embeddings=[question_embedding],
         n_results=min(n_results, collection.count()),
-        include=["documents", "metadatas", "distances"],
+        include=["documents"],
     )
-
-    docs = results.get("documents", [[]])[0]
-    logger.info(f"Query returned {len(docs)} results.")
-    return docs
+    return results.get("documents", [[]])[0]

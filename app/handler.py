@@ -26,40 +26,31 @@ class QuestionRequest(BaseModel):
 
 
 def lambda_handler(event, context):
-    # Internal call from scraper Lambda
     if event.get("source") == "scraper":
         return _handle_upsert(event)
-
-    # External call from API Gateway
     return _handle_question(event)
 
 
 def _handle_upsert(event):
-    """Called by scraper Lambda to upsert documents into ChromaDB."""
     try:
         documents = event.get("documents", [])
         if not documents:
             return {"statusCode": 400, "body": json.dumps({"error": "No documents provided"})}
-
         count = upsert_documents(documents)
         logger.info(f"Upserted {count} documents from scraper.")
         return {"statusCode": 200, "body": json.dumps({"upserted": count})}
-
     except Exception as e:
         logger.exception("Upsert failed")
         return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
 
 
 def _handle_question(event):
-    """Called by API Gateway for user questions."""
     try:
-        # Auth check
         headers = event.get("headers", {})
         request_key = headers.get("x-api-key") or headers.get("X-Api-Key")
         if API_KEY and request_key != API_KEY:
             return _response(401, {"error": "Unauthorized"})
 
-        # Parse + validate body
         raw_body = event.get("body", "{}")
         try:
             body = json.loads(raw_body)
